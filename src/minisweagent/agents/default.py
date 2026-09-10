@@ -2,11 +2,13 @@
 or https://minimal-agent.com for a tutorial on the basic building principles.
 """
 
+import contextlib
 import json
 import logging
 import time
 import traceback
 from pathlib import Path
+from typing import Any
 
 from jinja2 import StrictUndefined, Template
 from pydantic import BaseModel
@@ -33,6 +35,10 @@ class AgentConfig(BaseModel):
     """Exit after this many format errors in a row (0 = no limit)."""
     output_path: Path | None = None
     """Save the trajectory to this path."""
+    tool_log_path: Path | None = None
+    """Append one JSONL event per agent-triggered tool execution to this path.
+    `None` (the default) disables the instrumentation entirely. Writing is append-only: reruns add to
+    an existing file rather than replacing it, so reset the file yourself if you need a clean one."""
 
 
 class DefaultAgent:
@@ -153,8 +159,72 @@ class DefaultAgent:
 
     def execute_actions(self, message: dict) -> list[dict]:
         """Execute actions in message, add observation messages, return them."""
-        outputs = [self.env.execute(action) for action in message.get("extra", {}).get("actions", [])]
+        outputs = [
+            self.execute_action(action, i) for i, action in enumerate(message.get("extra", {}).get("actions", []))
+        ]
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+
+    def execute_action(self, action: dict, action_index: int = 0) -> dict[str, Any]:
+        """Execute a single agent-triggered action, recording a tool execution event if enabled.
+
+        The instrumentation is best effort: whatever happens inside it, the environment's return
+        value -- or the exception it raised, e.g. `Submitted` -- is what reaches the caller.
+        """
+        if not self.config.tool_log_path:  # disabled: execute without building events or timing
+            return self.env.execute(action)
+        prepared = None
+        try:
+            prepared = self._start_tool_event(action, action_index)
+        except Exception as e:
+            self._warn_tool_event_failure(e)
+        if prepared is None:  # instrumentation could not be set up: run the action once, uninstrumented
+            return self.env.execute(action)
+        event, start = prepared
+        try:
+            output = self.env.execute(action)
+        except Exception as e:
+            self._finish_tool_event(event, start, exception=e)
+            raise
+        self._finish_tool_event(event, start, output=output)
+        return output
+
+    def _start_tool_event(self, action: dict, action_index: int) -> tuple[dict, int]:
+        """Build the event and take the start readings, the monotonic one as late as possible."""
+        event = {
+            "event_type": "tool_execution",
+            "step_id": self.n_calls,
+            "action_index": action_index,
+            "raw_action": action.get("command", ""),
+            "start_time_ns": time.time_ns(),
+        }
+        if instance_id := getattr(self, "instance_id", ""):
+            event["instance_id"] = instance_id
+        if "tool_call_id" in action:
+            event["tool_call_id"] = action["tool_call_id"]
+        return event, time.perf_counter_ns()
+
+    def _finish_tool_event(
+        self, event: dict, start_ns: int, *, output: dict | None = None, exception: Exception | None = None
+    ) -> None:
+        """Record the end of the execution, then serialize and append the event. Never raises."""
+        try:
+            event |= {"end_time_ns": time.time_ns(), "duration_ns": time.perf_counter_ns() - start_ns}
+            if exception is not None:
+                event |= {"exception_type": type(exception).__name__, "exception_message": str(exception)}
+            else:
+                event |= _returned_event_fields(output)
+            line = json.dumps(event)  # serialize before touching the filesystem
+            path = self.config.tool_log_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a") as f:
+                f.write(line + "\n")
+        except Exception as e:
+            self._warn_tool_event_failure(e)
+
+    def _warn_tool_event_failure(self, error: Exception) -> None:
+        """Report an instrumentation failure; reporting must not raise either."""
+        with contextlib.suppress(Exception):
+            self.logger.warning(f"Failed to record tool execution event: {error}")
 
     def serialize(self, *extra_dicts) -> dict:
         """Serialize agent state to a json-compatible nested dictionary for saving."""
@@ -188,3 +258,19 @@ class DefaultAgent:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2))
         return data
+
+
+def _returned_event_fields(output: dict) -> dict[str, Any]:
+    """Tool event fields for an execution that returned rather than raised.
+
+    Environments report timeouts and other command failures in their return value (`returncode` -1
+    plus `exception_info`), which must stay distinguishable from an exception escaping `env.execute`.
+    """
+    fields: dict[str, Any] = {"return_code": output.get("returncode")}
+    if isinstance(text := output.get("output"), str):
+        fields["output_size_bytes"] = len(text.encode("utf-8"))
+    if exception_info := output.get("exception_info"):
+        fields["returned_exception_info"] = exception_info
+    if exception_type := output.get("extra", {}).get("exception_type"):
+        fields["returned_exception_type"] = exception_type
+    return fields

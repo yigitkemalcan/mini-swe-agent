@@ -14,7 +14,7 @@ from minisweagent.config import builtin_config_dir, get_config_from_spec
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
-from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent
+from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent, with_default_tool_log_path
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.serialize import UNSET, recursive_merge
 
@@ -88,7 +88,9 @@ def process_instance(
             {"command": 'git config user.name "mini-swe-agent" && git config user.email "mini-swe-agent@proton.me"'}
         )
 
-        agent_config = dict(inst_config.get("agent", {}))
+        agent_config = with_default_tool_log_path(
+            inst_config.get("agent", {}), instance_dir / f"{iid}.traj.tool_events.jsonl"
+        )
         agent_config["output_path"] = str(instance_dir / f"{iid}.traj.json")
         agent = ProgramBenchAgent(
             model,
