@@ -1,4 +1,4 @@
-# Agentic AI Characterization — Research Log
+# Agentic AI Research — Runtime Log
 
 > **Current analysis scope:** Semantic classification of tool calls is postponed. Classifying shell commands into categories requires heuristics whose correctness is not assured. For now, analysis uses recorded counts, durations, identifiers, outcomes, and other directly available fields without interpreting command purpose.
 >
@@ -8,32 +8,9 @@
 
 ---
 
-## 1. Project Goal
+## 1. Current Tool Measurement Semantics
 
-Characterize agentic AI workloads from a systems perspective.
-
-| Component        | Experimental target                        |
-| ---------------- | ------------------------------------------ |
-| Benchmark        | SWE-Bench / SWE-Bench Verified             |
-| Agent            | mini-SWE-Agent v2, package version `2.4.6` |
-| Model            | `Qwen/Qwen3-235B-A22B-Instruct-2507`       |
-| Inference server | vLLM `0.10.1.1`                            |
-| Hardware         | 8 x NVIDIA A100-SXM4-80GB                  |
-
-Current measurement objectives:
-
-1. Record each agent-requested tool/environment execution.
-2. Preserve the exact raw action for later semantic classification.
-3. Measure individual tool-execution duration.
-4. Count tool invocations and aggregate tool time.
-5. Keep enough identifiers to align tool events with benchmark instance and model-call step.
-6. Eventually measure explicit LLM/model-request time separately. Do **not** infer LLM time as run wall time minus tool time.
-
----
-
-## 2. Measurement Definition
-
-### 2.1 Tool invocation
+### 1.1 Tool invocation
 
 > **One agent-requested environment execution is one tool invocation.**
 
@@ -49,7 +26,7 @@ This is one invocation with one measured duration.
 
 Semantic categories such as `file_search`, `file_read`, `file_edit`, `test`, `version_control`, `submission`, `mixed`, and `unknown` are **not** assigned at runtime. The logger stores the exact `raw_action`; classification is performed later.
 
-### 2.2 Tool timing boundary
+### 1.2 Tool timing boundary
 
 The timer surrounds the agent-triggered `env.execute(action)` call.
 
@@ -63,11 +40,11 @@ For concurrent workers, summed tool durations are aggregate execution time and a
 
 ---
 
-## 3. System, Storage, and Canonical Paths
+## 2. System, Storage, and Canonical Paths
 
 This section is the central path reference for the project.
 
-### 3.1 Remote machine
+### 2.1 Remote machine
 
 | Item                           | Recorded value            |
 | ------------------------------ | ------------------------- |
@@ -81,7 +58,9 @@ This section is the central path reference for the project.
 | RAM                            | about 1.7 TiB             |
 | Docker root                    | `/mnt/raid0/docker`       |
 
-### 3.2 Project and experiment paths
+Remote development can also be performed with Codex Desktop over Remote SSH. The Codex project root is `/mnt/raid0/yigit/agent-characterization`; the Git repository itself is `/mnt/raid0/yigit/agent-characterization/mini-swe-agent`.
+
+### 2.2 Project and experiment paths
 
 | Purpose                   | Path                                                                    | Notes                                                                |
 | ------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------- |
@@ -104,7 +83,7 @@ This section is the central path reference for the project.
 
 The compatibility symlink `/home/jovan/agent-characterization` points to the active project root and must remain in place for the existing virtual environments. CLI paths may display this alias. Global mini-SWE-Agent settings remain at `/home/jovan/.config/mini-swe-agent/.env`.
 
-### 3.3 Exact Qwen snapshot
+### 2.3 Exact Qwen snapshot
 
 Model:
 
@@ -131,7 +110,7 @@ Download verification completed:
 - no `*.incomplete` files
 - model cache about 438 GiB
 
-### 3.4 Storage notes
+### 2.4 Storage notes
 
 `/mnt` is Azure temporary/ephemeral storage. It is appropriate for the large model/cache because these files are replaceable, but irreplaceable experiment results should also be copied to the local machine or persistent storage.
 
@@ -143,9 +122,9 @@ Avoid broad Docker cleanup on this shared machine.
 
 ---
 
-## 4. Validated Software State
+## 3. Validated Software State
 
-### 4.1 mini-SWE-Agent
+### 3.1 mini-SWE-Agent
 
 Remote checkout:
 
@@ -171,6 +150,14 @@ Validated tool-instrumentation commit:
 28decad8c36e6d69f61cf6cf28fa914582facfc9
 ```
 
+Recorded synchronized checkout (2026-09-15):
+
+```text
+4edd039bf9ce9af226cba1a5d7cd0d096a655bc2
+```
+
+This checkout contains the validated instrumentation plus the committed runtime helper scripts and experiment-analysis scripts. The added scripts are present on the remote machine; runtime validation should still be treated separately from repository synchronization.
+
 Package version:
 
 ```text
@@ -183,7 +170,7 @@ Agent environment entry point (the old-path alias may still appear in `which pyt
 /mnt/raid0/yigit/agent-characterization/mini-swe-agent/.venv/bin/python
 ```
 
-### 4.2 vLLM serving environment
+### 3.2 vLLM serving environment
 
 | Component        | Validated version |
 | ---------------- | ----------------- |
@@ -195,7 +182,7 @@ Agent environment entry point (the old-path alias may still appear in `which pyt
 
 The Transformers/Tokenizers versions are intentional. The earlier Transformers 5.x environment was incompatible with this vLLM/model path.
 
-### 4.3 mini-SWE-Agent local-model configuration
+### 3.3 mini-SWE-Agent local-model configuration
 
 The global default model was set to:
 
@@ -219,24 +206,24 @@ Do not permanently modify the repository benchmark YAML just to point it at the 
 
 ---
 
-# 5. Complete Runtime Procedure — Two-Terminal Workflow
+# 4. Complete Runtime Procedure — Two-Terminal Workflow
 
 Choose one way to run the system:
 
-- **Script workflow:** connect using Section 5.1, then follow Section 5.0. The scripts perform environment activation and the run/evaluation commands for you.
-- **Manual workflow:** follow Sections 5.1–5.10 in order instead of running the scripts.
-- For either workflow, Section 5.11 covers optional result copying and Section 5.12 covers detaching or stopping.
+- **Script workflow:** connect using Section 4.1, then follow Section 4.0. The scripts perform environment activation and the run/evaluation commands for you.
+- **Manual workflow:** follow Sections 4.1–4.10 in order instead of running the scripts.
+- For either workflow, Section 4.11 covers optional result copying and Section 4.12 covers detaching or stopping.
 
 Command labels are consistent throughout this section:
 
-| Label | Meaning |
-| --- | --- |
-| **Required action** | Performs part of the selected workflow. |
-| **Conditional action** | Run only when the stated condition applies. |
-| **Alternative action** | Choose one example; do not execute every alternative. |
+| Label                       | Meaning                                                                  |
+| --------------------------- | ------------------------------------------------------------------------ |
+| **Required action**         | Performs part of the selected workflow.                                  |
+| **Conditional action**      | Run only when the stated condition applies.                              |
+| **Alternative action**      | Choose one example; do not execute every alternative.                    |
 | **Verification — required** | Check the stated result before continuing; resolve a failed check first. |
-| **Verification — optional** | Diagnostic inspection; it does not perform a required setup step. |
-| **Optional action** | Extra work you may skip, such as copying results. |
+| **Verification — optional** | Diagnostic inspection; it does not perform a required setup step.        |
+| **Optional action**         | Extra work you may skip, such as copying results.                        |
 
 Blocks marked `text` show expected output, paths, or key presses; they are not shell commands. Replace angle-bracket placeholders before executing examples.
 
@@ -266,7 +253,7 @@ Do not activate the vLLM and mini-SWE-Agent environments in the same shell.
 
 ---
 
-## 5.0 Script shortcuts — same two-terminal workflow
+## 4.0 Script shortcuts — same two-terminal workflow
 
 The following scripts live beside this log in the `mini-swe-agent` repository root:
 
@@ -276,7 +263,7 @@ The following scripts live beside this log in the `mini-swe-agent` repository ro
 
 These scripts use installed environments; they do not install dependencies or create virtual environments. Run them with `bash`, not `source`. Their environment changes stay inside the script, so manually switching virtual environments in the parent terminal is unnecessary. The old-path compatibility symlink must remain in place.
 
-After transferring the scripts to the remote checkout, use the following commands. All commands in this subsection run on the remote machine after SSH login.
+Use the following commands from the remote checkout. All commands in this subsection run on the remote machine after SSH login.
 
 **Terminal 1 — create the tmux session if it does not exist:**
 
@@ -403,11 +390,11 @@ bash run-swebench.sh --help
 bash evaluate-swebench.sh --help
 ```
 
-The scripts were reviewed locally and checked for shell syntax only. Remote execution is required to validate them. The manual commands below remain available for step-by-step operation.
+The scripts are version-controlled and present in the remote checkout. At this checkpoint they have been reviewed and shell-syntax checked; runtime validation should still be completed on the remote machine. The manual commands below remain available for step-by-step operation.
 
 ---
 
-## 5.1 Before starting — open both SSH terminals
+## 4.1 Before starting — open both SSH terminals
 
 On the **local Mac**, open two terminal windows.
 
@@ -436,7 +423,7 @@ Remote Terminal 2 = agent / benchmark / evaluation
 
 ---
 
-## 5.2 Remote Terminal 1 — start the vLLM/Qwen server
+## 4.2 Remote Terminal 1 — start the vLLM/Qwen server
 
 ### Step 1: make sure Terminal 1 is not using another virtual environment
 
@@ -464,7 +451,7 @@ If `qwen-vllm` exists:
 tmux attach -t qwen-vllm
 ```
 
-If the vLLM server is already running inside that session, **do not start another copy**. Leave it running and continue to Section 5.3 in Terminal 2.
+If the vLLM server is already running inside that session, **do not start another copy**. Leave it running and continue to Section 4.3 in Terminal 2.
 
 If `qwen-vllm` does not exist:
 
@@ -588,7 +575,7 @@ Do **not** use `Ctrl+C` merely to disconnect. `Ctrl+C` stops vLLM.
 
 ---
 
-## 5.3 Remote Terminal 2 — open tmux and verify vLLM
+## 4.3 Remote Terminal 2 — open tmux and verify vLLM
 
 Terminal 2 uses its own persistent tmux session for mini-SWE-Agent, SWE-Bench, result inspection, and official evaluation.
 
@@ -608,7 +595,7 @@ If the session already exists, attach instead:
 tmux attach -t swebench-agent
 ```
 
-If a run or evaluation is already active, let it finish rather than starting another. Perform all Terminal 2 commands in Sections 5.3–5.10 inside this session. Use `qwen-vllm` only for Terminal 1's model server; do not nest these sessions.
+If a run or evaluation is already active, let it finish rather than starting another. Perform all Terminal 2 commands in Sections 4.3–4.10 inside this session. Use `qwen-vllm` only for Terminal 1's model server; do not nest these sessions.
 
 ### Step 1: verify that vLLM from Terminal 1 is listening
 
@@ -691,7 +678,7 @@ bash tool call such as: echo TOOL_OK
 
 ---
 
-## 5.4 Remote Terminal 2 — activate mini-SWE-Agent
+## 4.4 Remote Terminal 2 — activate mini-SWE-Agent
 
 ### Step 1: leave any previously active environment
 
@@ -757,7 +744,7 @@ This is the environment that must remain active while running `mini` or `mini-ex
 
 ---
 
-## 5.5 Remote Terminal 2 — create a fresh benchmark run
+## 4.5 Remote Terminal 2 — create a fresh benchmark run
 
 Always create a new timestamped directory for a logically new run.
 
@@ -797,7 +784,7 @@ Do not permanently edit the repository's benchmark YAML just to point it at the 
 
 ---
 
-## 5.6 Remote Terminal 2 — run SWE-Bench Verified
+## 4.6 Remote Terminal 2 — run SWE-Bench Verified
 
 Example using the already validated instance:
 
@@ -837,7 +824,7 @@ $RUN_DIR/
 
 ---
 
-## 5.7 Remote Terminal 2 — inspect the benchmark artifacts
+## 4.7 Remote Terminal 2 — inspect the benchmark artifacts
 
 After the agent run finishes, while the mini-SWE-Agent environment is still active:
 
@@ -887,7 +874,7 @@ At this point the agent/benchmark run is complete.
 
 ---
 
-## 5.8 Remote Terminal 2 — switch from mini-SWE-Agent to the SWE-Bench evaluator
+## 4.8 Remote Terminal 2 — switch from mini-SWE-Agent to the SWE-Bench evaluator
 
 The evaluator uses a **different** virtual environment. Evaluation can be performed later, after the agent run has finished; vLLM does not need to be running.
 
@@ -926,7 +913,7 @@ test -f "$RUN_DIR/results/preds.json" && echo "Predictions found"
 
 If `Predictions found` is not printed, correct `RUN_DIR` first. If `PRED_JSON` or `PRED_JSONL` was previously assigned using an unset or different `RUN_DIR`, those variables must be assigned again; changing `RUN_DIR` does not update them automatically.
 
-**Alternative action — use the evaluation script for all predictions in this Verified run. It activates the evaluator environment, converts predictions, and selects a unique evaluation ID automatically. Skip the remaining manual steps in Sections 5.8–5.10 when using this command.**
+**Alternative action — use the evaluation script for all predictions in this Verified run. It activates the evaluator environment, converts predictions, and selects a unique evaluation ID automatically. Skip the remaining manual steps in Sections 4.8–4.10 when using this command.**
 
 ```bash
 bash /mnt/raid0/yigit/agent-characterization/mini-swe-agent/evaluate-swebench.sh "$RUN_DIR"
@@ -972,7 +959,7 @@ The old `/home/jovan/agent-characterization/envs/swebench-eval/bin/python` path 
 
 ---
 
-## 5.9 Remote Terminal 2 — convert predictions for the official evaluator
+## 4.9 Remote Terminal 2 — convert predictions for the official evaluator
 
 mini-SWE-Agent writes:
 
@@ -1025,7 +1012,7 @@ cat "$PRED_JSONL"
 
 ---
 
-## 5.10 Remote Terminal 2 — run official SWE-Bench evaluation
+## 4.10 Remote Terminal 2 — run official SWE-Bench evaluation
 
 Move to the project root so the summary JSON is written in a known location:
 
@@ -1075,7 +1062,7 @@ Summary filename pattern (use the actual run ID from this evaluation):
 
 ---
 
-## 5.11 Local Mac — copy benchmark results to the Desktop
+## 4.11 Local Mac — copy benchmark results to the Desktop
 
 Run these commands on the **local Mac**, not on the remote server.
 
@@ -1124,161 +1111,24 @@ scp -O -r \
 
 ---
 
-## 5.12 Ending the session
+## 5. Tool Instrumentation
 
-### If more experiments will be run soon
+mini-SWE-Agent was instrumented to record agent-triggered environment executions in JSONL tool-event logs. For SWE-Bench and ProgramBench, the benchmark runner automatically creates a per-instance tool-log path; generic agents can leave logging disabled with `agent.tool_log_path = None`.
 
-Leave vLLM running.
+The recorded data includes benchmark/model-step linkage, the exact raw action, timestamps and elapsed duration, tool-call identifiers when available, return/error metadata, and returned output size. A compound shell command remains one tool invocation because logging and timing surround a single `env.execute(action)` call.
 
-**Conditional action — when disconnecting while preserving the processes, detach from each terminal’s tmux session:**
-
-```text
-Ctrl+B
-D
-```
-
-Then both local terminal windows may be closed.
-
-Later, reconnect and use:
-
-**Conditional action — attach to this existing session when reconnecting; skip if already inside it.**
-
-```bash
-tmux attach -t qwen-vllm
-```
-
-In Terminal 2, reconnect to the agent/evaluator session:
-
-**Conditional action — attach to this existing session when reconnecting; skip if already inside it.**
-
-```bash
-tmux attach -t swebench-agent
-```
-
-### If vLLM should be stopped and the GPUs released
-
-Attach to the vLLM session:
-
-**Conditional action — attach to this existing session when reconnecting; skip if already inside it.**
-
-```bash
-tmux attach -t qwen-vllm
-```
-
-**Conditional action — only when you want to stop vLLM and release its GPUs, press:**
-
-```text
-Ctrl+C
-```
-
-Wait for the shell prompt to return.
-
-Optional GPU check:
-
-**Verification — optional: inspect GPU usage after stopping your server.**
-
-```bash
-nvidia-smi
-```
-
-Terminal 2 can be closed after detaching with Ctrl+B then D, even while the agent or evaluator is running. The `swebench-agent` session keeps the process and shell alive. Ctrl+C interrupts the active job; do not use it just to disconnect.
-
----
-
-## 6. Tool Instrumentation
-
-The validated implementation touches:
-
-| File                                              | Purpose                                               |
-| ------------------------------------------------- | ----------------------------------------------------- |
-| `src/minisweagent/agents/default.py`              | Shared tool-execution wrapper and JSONL logging       |
-| `src/minisweagent/agents/interactive.py`          | Routes interactive actions through the shared wrapper |
-| `src/minisweagent/run/benchmarks/utils/common.py` | Per-instance default tool-log path handling           |
-| `src/minisweagent/run/benchmarks/swebench.py`     | Enables per-instance tool logging for SWE-Bench       |
-| `src/minisweagent/run/benchmarks/programbench.py` | Enables the same pattern for ProgramBench             |
-| `tests/agents/test_tool_logging.py`               | Tool-logging tests                                    |
-| `tests/run/test_benchmark_utils.py`               | Benchmark-path/config helper tests                    |
-
-For a generic agent, `agent.tool_log_path = None` means logging is disabled.
-
-For SWE-Bench and ProgramBench, the benchmark runner automatically seeds a per-instance path.
-
-Typical pair:
+Typical artifacts are:
 
 ```text
 django__django-11099.traj.json
 django__django-11099.traj.tool_events.jsonl
 ```
 
-Use fresh output directories for experiments. Do not point multiple workers to a single custom shared JSONL path.
-
-### Tool-event schema
-
-| Field                     | Meaning                                               |
-| ------------------------- | ----------------------------------------------------- |
-| `event_type`              | `tool_execution`                                      |
-| `step_id`                 | model-call progression index used by the agent        |
-| `action_index`            | zero-based action position within that model response |
-| `raw_action`              | exact command sent to the environment                 |
-| `start_time_ns`           | wall-clock start timestamp                            |
-| `end_time_ns`             | wall-clock end timestamp                              |
-| `duration_ns`             | monotonic elapsed execution duration                  |
-| `instance_id`             | benchmark instance when available                     |
-| `tool_call_id`            | model-provided tool-call ID when available            |
-| `return_code`             | returned environment code                             |
-| `output_size_bytes`       | UTF-8 byte length of returned output string           |
-| `returned_exception_type` | returned timeout/error type when applicable           |
-| `returned_exception_info` | returned timeout/error detail when applicable         |
-| `exception_type`          | exception escaping `env.execute`, e.g. `Submitted`    |
-| `exception_message`       | escaping exception message                            |
-
-`Submitted` is expected completion behavior and is not automatically a failed tool execution.
+Use fresh output directories for experiments, and do not point concurrent workers to one shared custom JSONL path. `Submitted` is expected completion behavior and is not automatically a failed tool execution.
 
 ---
 
-## 9. Local Editing / Remote Execution Rule
-
-The local coding agent can inspect and edit code, but it cannot execute the project.
-
-The workflow is:
-
-```text
-LOCAL CODING AGENT
-    inspect/edit source and tests only
-        ->
-USER ON LOCAL MAC
-    review diff
-    stage/commit/push
-        ->
-REMOTE GPU MACHINE
-    pull approved commit
-    run tests
-    run Docker/integration/benchmark experiments
-```
-
-Do not ask the local coding agent to run shell commands, Python, tests, Git, Docker, SSH, vLLM, or SWE-Bench.
-
-The user performs local Git operations manually.
-
-When updating the remote checkout:
-
-```bash
-cd /mnt/raid0/yigit/agent-characterization/mini-swe-agent
-git status --short
-git fetch origin
-git switch characterization/tool-profiling
-git pull --ff-only origin characterization/tool-profiling
-git rev-parse HEAD
-
-source .venv/bin/activate
-which python
-```
-
-If the working tree is unexpectedly dirty, stop rather than using a destructive reset.
-
----
-
-## 10. Current Measurement Status
+## 6. Current Measurement Status
 
 | Quantity                                       | Status                                                           |
 | ---------------------------------------------- | ---------------------------------------------------------------- |
