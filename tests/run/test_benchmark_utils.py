@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
-from minisweagent.run.benchmarks.utils.common import logger, with_default_tool_log_path
+from minisweagent.run.benchmarks.utils.common import (
+    logger,
+    with_default_model_log_path,
+    with_default_tool_log_path,
+)
 
 
 def _failing_unlink(self, missing_ok=False):
@@ -69,3 +73,24 @@ def test_shared_agent_config_is_not_mutated(tmp_path):
     assert with_default_tool_log_path(config, tmp_path / "a.jsonl")["tool_log_path"] == tmp_path / "a.jsonl"
     assert with_default_tool_log_path(config, tmp_path / "b.jsonl")["tool_log_path"] == tmp_path / "b.jsonl"
     assert config == {"cost_limit": 3.0}
+
+
+def test_default_model_path_is_per_instance_and_reset(tmp_path):
+    default = tmp_path / "inst-a" / "inst-a.traj.model_events.jsonl"
+    default.parent.mkdir()
+    default.write_text('{"event_type": "model_request"}\n')
+
+    assert with_default_model_log_path({"cost_limit": 3.0}, default) == {
+        "cost_limit": 3.0,
+        "model_log_path": default,
+    }
+    assert not default.exists()
+
+
+def test_custom_model_path_wins_and_is_never_deleted(tmp_path):
+    (default := tmp_path / "default.jsonl").write_text("stale default\n")
+    (custom := tmp_path / "custom.jsonl").write_text("earlier run\n")
+
+    assert with_default_model_log_path({"model_log_path": custom}, default)["model_log_path"] == custom
+    assert custom.read_text() == "earlier run\n"
+    assert default.read_text() == "stale default\n"

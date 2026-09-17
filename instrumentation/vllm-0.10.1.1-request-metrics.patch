@@ -1,0 +1,12 @@
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -475,5 +476,9 @@ class OutputProcessor:
+         assert finish_reason is not None
+         assert req_state.stats is not None
++        log_finished_request_metrics(
++            req_state.request_id, finish_reason,
++            len(req_state.prompt_token_ids), req_state.stats)
++
+         iteration_stats.update_from_finished_request(
+             finish_reason=finish_reason,
+             num_prompt_tokens=len(req_state.prompt_token_ids),

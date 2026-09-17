@@ -27,6 +27,19 @@ def with_default_tool_log_path(agent_config: dict, default: Path) -> dict:
     return config
 
 
+def with_default_model_log_path(agent_config: dict, default: Path) -> dict:
+    """Return a copy of `agent_config` with a clean per-instance model event path by default."""
+    config = {"model_log_path": default} | agent_config
+    if config["model_log_path"] == default:
+        try:
+            default.unlink(missing_ok=True)
+        except Exception as e:
+            config["model_log_path"] = None
+            with contextlib.suppress(Exception):
+                logger.warning(f"Disabling model logging for '{default}': stale log could not be cleared: {e}")
+    return config
+
+
 class ProgressTrackingAgent(DefaultAgent):
     """Agent that reports per-step progress via :class:`RunBatchProgressManager`."""
 

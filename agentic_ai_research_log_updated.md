@@ -1,6 +1,6 @@
 # Agentic AI Characterization — Research Log
 
-> **Current checkpoint:** the measurement stack is now validated end-to-end for tool execution, logical model-request latency, token usage, per-attempt vLLM server timing, and request-ID correlation. A 100-instance SWE-Bench Verified characterization run has been completed and officially evaluated.
+> **Current checkpoint:** the measurement stack now covers tool execution, logical model-request latency, token usage, per-attempt vLLM server timing, request-ID correlation, and run-level CPU/GPU resource sampling. A 100-instance SWE-Bench Verified characterization run has been completed and officially evaluated.
 >
 > **Current analysis scope:** semantic classification of shell commands into tool categories remains postponed. Analysis should first use directly recorded counts, durations, token counts, identifiers, exit statuses, and benchmark outcomes.
 >
@@ -32,6 +32,7 @@ Current measurement objectives:
 7. Measure vLLM queue, prefill, decode, and inference-phase durations.
 8. Correlate model calls, retry attempts, tool calls, and benchmark instances.
 9. Join systems measurements with official SWE-Bench outcomes.
+10. Measure runtime density from a shared run-level CPU/GPU time series before attempting per-tool resource attribution.
 
 ---
 
@@ -167,6 +168,27 @@ The vLLM event independently records prompt and generated-token counts.
 
 The validated single-instance run showed exact client/server agreement for all correlated requests.
 
+### 3.5 Run-level resource timeline
+
+`run-swebench.sh` starts one lightweight sampler for the lifetime of the
+benchmark command. Samples use wall-clock nanoseconds for alignment with model
+and tool events and `CLOCK_MONOTONIC` nanoseconds/elapsed time for stable local
+ordering. This first version intentionally measures the whole experiment rather
+than attributing CPU or GPU activity to individual tools.
+
+CPU utilization comes from deltas of the aggregate `/proc/stat` CPU counters.
+It is normalized to 0–100% across the host and treats I/O wait as separate from
+active utilization. Steal time is recorded separately and remains part of
+active utilization. Host memory comes from `/proc/meminfo`; used memory is
+`MemTotal - MemAvailable`, not process RSS. GPU utilization and memory come from
+native NVML calls for all eight devices, identified by index and UUID. No
+`nvidia-smi` subprocess is launched per sample.
+
+At the default 500 ms interval, CPU percentages describe the interval between
+readings. NVML utilization remains the driver's recent utilization sample and
+must not be interpreted as exclusive per-request CUDA-kernel time. Host/GPU
+memory maxima are observed sample maxima, so shorter spikes can be missed.
+
 ---
 
 ## 4. System and Storage
@@ -261,6 +283,13 @@ For each SWE-Bench instance, mini-SWE-Agent now produces:
 <instance>.traj.model_events.jsonl
 ```
 
+Each benchmark run also produces:
+
+```text
+system_metrics.jsonl
+system_metrics_summary.json
+```
+
 ### 6.1 Tool-event log
 
 Important fields include:
@@ -326,6 +355,33 @@ finish_reason
 Request IDs correlate the vLLM records with mini-SWE-Agent run, instance, logical step, and retry attempt.
 
 Because this is a global log, records from different experiment runs can coexist. Analysis should filter by the run encoded in the request ID rather than assuming the whole file belongs to one run.
+
+### 6.4 System-metrics log
+
+`system_metrics.jsonl` contains the run-level time series. Important fields are:
+
+```text
+event_type
+run_id
+timestamp_ns
+timestamp_utc
+monotonic_ns
+elapsed_ns
+cpu_util_percent
+cpu_user_percent
+cpu_system_percent
+cpu_iowait_percent
+cpu_steal_percent
+host_memory_used_bytes
+host_memory_available_bytes
+host_memory_free_bytes
+host_memory_total_bytes
+gpus[]
+```
+
+Each GPU record contains its NVML index, UUID, utilization, memory used, and
+total memory. `system_metrics_summary.json` records sample/run bounds and the
+requested aggregate means and sampled maxima.
 
 ---
 
@@ -537,6 +593,9 @@ These error cases remain to be inspected separately. They should not automatical
 | vLLM prefill duration | Available |
 | vLLM decode duration | Available |
 | vLLM inference-phase duration | Available |
+| Run-level host CPU utilization time series | Available |
+| Run-level host memory time series | Available |
+| Per-GPU NVML utilization/memory time series | Available |
 | Model/tool step alignment | Validated |
 | Client/server token agreement | Validated |
 | Official SWE-Bench outcome | Available for the 100-instance run |

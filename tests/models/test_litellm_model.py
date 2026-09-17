@@ -33,10 +33,37 @@ class TestLitellmModel:
         mock_cost.return_value = 0.001
 
         model = LitellmModel(model_name="gpt-4")
-        model.query([{"role": "user", "content": "test"}])
+        model.set_request_context(run_id="run-7", instance_id="django__django-11133", step_id=4)
+        result = model.query([{"role": "user", "content": "test"}])
 
         mock_completion.assert_called_once()
         assert mock_completion.call_args.kwargs["tools"] == [BASH_TOOL]
+        request_id = mock_completion.call_args.kwargs["extra_headers"]["X-Request-Id"]
+        assert request_id.startswith("mswea-run-7-django__django-11133-step4-attempt1-")
+        assert mock_completion.call_args.kwargs["num_retries"] == 0
+        assert result["extra"]["request_ids"] == [request_id]
+
+    def test_attempt_ids_are_unique_and_keep_correlation_hierarchy(self):
+        model = LitellmModel(model_name="gpt-4")
+        model.set_request_context(run_id="run/unsafe", instance_id="inst:a", step_id=9)
+
+        first = model._make_request_id(1)
+        second = model._make_request_id(2)
+        assert first.startswith("mswea-run_unsafe-inst_a-step9-attempt1-")
+        assert second.startswith("mswea-run_unsafe-inst_a-step9-attempt2-")
+        assert first != second
+
+    @patch("minisweagent.models.litellm_model.litellm.completion", side_effect=RuntimeError("API down"))
+    def test_failed_api_attempt_exposes_its_request_id(self, mock_completion, monkeypatch):
+        monkeypatch.setenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "1")
+        model = LitellmModel(model_name="gpt-4")
+        model.set_request_context(run_id="run-7", instance_id="instance-2", step_id=3)
+
+        with pytest.raises(RuntimeError, match="API down") as exc:
+            model.query([{"role": "user", "content": "test"}])
+
+        request_id = mock_completion.call_args.kwargs["extra_headers"]["X-Request-Id"]
+        assert exc.value.model_request_ids == [request_id]
 
     @patch("minisweagent.models.litellm_model.litellm.completion")
     @patch("minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost")

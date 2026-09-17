@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from minisweagent import Environment, Model, __version__
 from minisweagent.exceptions import FormatError, InterruptAgentFlow, LimitsExceeded, TimeExceeded
+from minisweagent.models.utils.actions_toolcall_response import finish_reason_from_responses_api
 from minisweagent.utils.serialize import recursive_merge
 
 
@@ -39,6 +40,11 @@ class AgentConfig(BaseModel):
     """Append one JSONL event per agent-triggered tool execution to this path.
     `None` (the default) disables the instrumentation entirely. Writing is append-only: reruns add to
     an existing file rather than replacing it, so reset the file yourself if you need a clean one."""
+    model_log_path: Path | None = None
+    """Append one JSONL event per model request to this path.
+    Durations cover the direct `model.query(...)` call, including model-client and server overhead."""
+    run_id: str = ""
+    """Identifier shared by all instances in one benchmark run, used to correlate model API attempts."""
 
 
 class DefaultAgent:
@@ -152,10 +158,76 @@ class DefaultAgent:
                 }
             )
         self.n_calls += 1
-        message = self.model.query(self.messages)
+        if set_request_context := getattr(self.model, "set_request_context", None):
+            set_request_context(
+                run_id=self.config.run_id,
+                instance_id=getattr(self, "instance_id", ""),
+                step_id=self.n_calls,
+            )
+        if not self.config.model_log_path:
+            message = self.model.query(self.messages)
+        else:
+            prepared = None
+            try:
+                prepared = self._start_model_event()
+            except Exception as e:
+                self._warn_model_event_failure(e)
+            if prepared is None:
+                message = self.model.query(self.messages)
+            else:
+                event, start = prepared
+                try:
+                    message = self.model.query(self.messages)
+                except Exception as e:
+                    self._finish_model_event(event, start, exception=e)
+                    raise
+                self._finish_model_event(event, start, message=message)
         self.cost += message.get("extra", {}).get("cost", 0.0)
         self.add_messages(message)
         return message
+
+    def _start_model_event(self) -> tuple[dict, int]:
+        """Build a model-request event and take the monotonic start reading immediately before the call."""
+        return {
+            "event_type": "model_request",
+            "instance_id": getattr(self, "instance_id", ""),
+            "step_id": self.n_calls,
+            "start_time_ns": time.time_ns(),
+        }, time.perf_counter_ns()
+
+    def _finish_model_event(
+        self, event: dict, start_ns: int, *, message: dict | None = None, exception: Exception | None = None
+    ) -> None:
+        """Finish and append a model-request event without changing model-call behavior."""
+        try:
+            event |= {
+                "end_time_ns": time.time_ns(),
+                "duration_ns": time.perf_counter_ns() - start_ns,
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+                "finish_reason": None,
+                "status": "error" if exception is not None else "success",
+            }
+            if exception is not None:
+                event |= {"error_type": type(exception).__name__, "error_message": str(exception)}
+                if request_ids := getattr(exception, "model_request_ids", None):
+                    event |= {"request_id": request_ids[-1], "request_ids": request_ids}
+                message = _message_from_model_exception(exception)
+            if message is not None:
+                event |= _model_response_fields(message)
+            line = json.dumps(event)
+            path = self.config.model_log_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a") as f:
+                f.write(line + "\n")
+        except Exception as e:
+            self._warn_model_event_failure(e)
+
+    def _warn_model_event_failure(self, error: Exception) -> None:
+        """Report a model instrumentation failure without affecting the request."""
+        with contextlib.suppress(Exception):
+            self.logger.warning(f"Failed to record model request event: {error}")
 
     def execute_actions(self, message: dict) -> list[dict]:
         """Execute actions in message, add observation messages, return them."""
@@ -273,4 +345,32 @@ def _returned_event_fields(output: dict) -> dict[str, Any]:
         fields["returned_exception_info"] = exception_info
     if exception_type := output.get("extra", {}).get("exception_type"):
         fields["returned_exception_type"] = exception_type
+    return fields
+
+
+def _message_from_model_exception(exception: Exception) -> dict | None:
+    """Return a persisted response message when a model error provides one (for example FormatError)."""
+    messages = getattr(exception, "messages", None)
+    return messages[0] if isinstance(messages, (list, tuple)) and messages and isinstance(messages[0], dict) else None
+
+
+def _model_response_fields(message: dict) -> dict[str, Any]:
+    """Extract provider-neutral usage and finish metadata from a model message's persisted response."""
+    extra = message.get("extra", {})
+    response = extra.get("response", {})
+    if not isinstance(response, dict):
+        return {}
+    usage = response.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    choices = response.get("choices") or []
+    finish_reason = choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None
+    fields = {
+        "prompt_tokens": usage.get("prompt_tokens", usage.get("input_tokens")),
+        "completion_tokens": usage.get("completion_tokens", usage.get("output_tokens")),
+        "total_tokens": usage.get("total_tokens"),
+        "finish_reason": finish_reason or response.get("finish_reason") or finish_reason_from_responses_api(response),
+    }
+    if request_ids := extra.get("request_ids"):
+        fields |= {"request_id": request_ids[-1], "request_ids": request_ids}
     return fields

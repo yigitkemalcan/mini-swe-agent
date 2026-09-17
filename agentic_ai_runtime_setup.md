@@ -19,6 +19,7 @@ LOCAL MAC
 └── Terminal 2 -> SSH -> tmux: swebench-agent
                      -> mini-SWE-Agent / SWE-Bench
                      -> per-instance model + tool logs
+                     -> run-level CPU/GPU resource samples
                      -> official SWE-Bench evaluation
 ```
 
@@ -252,6 +253,13 @@ bash run-swebench.sh --all --workers 1
 
 Only increase worker count if overlapping requests/tools are part of the experiment.
 
+Resource sampling starts automatically. The default interval is 0.5 seconds;
+set it explicitly when needed:
+
+```bash
+bash run-swebench.sh --slice 0:100 --workers 1 --system-metrics-interval 0.5
+```
+
 ---
 
 # 5. Outputs Produced by a Run
@@ -268,6 +276,8 @@ Typical structure:
 qwen-run-<timestamp>-<suffix>/
 ├── local-qwen.yaml
 ├── agent-command.txt
+├── system_metrics.jsonl
+├── system_metrics_summary.json
 └── results/
     ├── preds.json
     ├── minisweagent.log
@@ -293,6 +303,30 @@ Contains the exact agent-triggered actions and tool execution timing.
 ```
 
 Contains logical mini-SWE-Agent model-call measurements, token usage, status, finish reason, and request-ID correlation information.
+
+### Run-level system metrics
+
+```text
+system_metrics.jsonl
+system_metrics_summary.json
+```
+
+The sampler covers the benchmark command's complete lifetime and stays separate
+from per-instance records. Each JSONL sample contains wall-clock and monotonic
+timestamps, aggregate host CPU utilization and user/system/I/O-wait breakdown,
+host memory, and utilization/memory for NVML GPU indices 0 through 7. The
+summary contains the sampling interval, sample count, run bounds, mean/maximum
+CPU utilization, sampled peak host memory, and per-GPU mean/maximum utilization
+and sampled peak memory.
+
+Aggregate CPU utilization is normalized to 0–100% for the whole host and is
+defined as `(total - idle - iowait) / total` over consecutive `/proc/stat`
+readings. User includes nice time; system includes IRQ and soft-IRQ time; steal
+time is preserved separately. Host memory used is `MemTotal - MemAvailable`;
+`MemFree` is also preserved. NVML GPU
+utilization is the driver's recent utilization sample, not exclusive GPU-kernel
+time. All reported memory peaks are sampled peaks and can miss sub-interval
+spikes.
 
 ### Global vLLM request events
 

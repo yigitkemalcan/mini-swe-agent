@@ -1,5 +1,56 @@
 # Experiment analysis
 
+## Run-level system sampling
+
+`run-swebench.sh` automatically starts `scripts/sample_system_metrics.py` after
+creating the run directory and stops it when the benchmark command exits,
+including error and signal exits. The default interval is 0.5 seconds; override
+it for a run with:
+
+```bash
+bash run-swebench.sh --slice 0:5 --system-metrics-interval 1.0
+```
+
+The sampler writes `system_metrics.jsonl` and
+`system_metrics_summary.json` at the top of the run directory. It reads
+aggregate CPU counters from `/proc/stat`, host memory from `/proc/meminfo`, and
+all eight GPUs through the native NVML library. It does not invoke
+`nvidia-smi`, vLLM, Docker, or a GPU workload.
+
+Each JSONL sample has wall-clock `timestamp_ns`/`timestamp_utc` fields for
+alignment with model and tool event timestamps, plus `monotonic_ns`,
+`elapsed_ns`, `boot_id`, `clock`, and the enclosing directory's `run_id` for stable ordering and correlation. GPU
+records use NVML indices and include UUIDs so identities remain explicit.
+
+`cpu_util_percent` is aggregate active CPU time normalized to 0–100% across the
+whole host: `(total - idle - iowait) / total`. `cpu_user_percent` includes
+user and nice time; `cpu_system_percent` includes system, IRQ, and soft-IRQ
+time; I/O wait is separate. CPU steal time is also recorded, so active
+utilization can exceed user plus system time on a virtualized host. Memory used
+is `MemTotal - MemAvailable`, not agent-process RSS. CPU percentages cover the interval since the preceding
+sample. NVML GPU utilization is the driver's recent utilization sample, not
+exclusive CUDA-kernel time. Memory peaks are sampled peaks and can miss spikes
+shorter than the configured interval.
+
+The summary reports a CPU-interval-weighted mean and maximum, sampled peak host
+memory, and sampled mean/maximum utilization and peak memory for every GPU.
+The run wrapper verifies access to exactly eight GPUs before launching the
+benchmark and treats unexpected sampler termination as a run error.
+
+Create timeline, heatmap, and summary graphs from a completed run with:
+
+```bash
+python scripts/system_metrics_visualization/plot_system_metrics.py /path/to/qwen-run
+```
+
+The dependency-free visualizer writes an HTML index, standalone SVG graphs,
+and a derived JSON summary under
+`scripts/system_metrics_visualization/results/<run-id>/` by default. See
+`scripts/system_metrics_visualization/README.md` for graph semantics and output
+details.
+
+## Tool and model-event analysis
+
 Run from the repository root with the existing mini-SWE-Agent Python environment (requires `typer`). No model, Docker, or evaluator is launched by this script.
 
 ```bash
@@ -25,3 +76,29 @@ Pass the official report **for this experiment** using `--evaluation`. Summary f
 Missing trajectories and tool logs are reported. Missing token usage is excluded from token statistics and flagged by comparing response/sample counts with the trajectory model-call count. All aggregates describe **available recorded measurements**, not guaranteed complete workload totals. Missing metrics are null in JSON or blank in CSV; sample count zero indicates no observations. Malformed JSON or invalid duration/token values raise an error instead of being silently skipped. Valid but missing events cannot always be detected from these artifacts alone.
 
 No command parsing, semantic categories, inferred LLM time, overhead subtraction, or total runtime is included.
+
+## Model-event and vLLM analysis
+
+Use the dedicated model analyzer for the per-instance `*.traj.model_events.jsonl`
+files. Supplying the vLLM JSONL enables request-ID correlation and server-side
+timing analysis; supplying the official evaluation report adds outcome labels.
+
+```bash
+python scripts/analyze_model_events.py /path/to/experiment
+python scripts/analyze_model_events.py /path/to/experiment \
+  --vllm-log /path/to/vllm-logs/request_events.jsonl \
+  --evaluation /path/to/official-summary.json
+```
+
+It writes `experiment.json`, `instances.csv`, and `requests.csv` under
+`model-analysis/` by default. Metrics include model/API request duration;
+prompt, completion, and total tokens; request statuses and errors; finish
+reasons; and vLLM queue, prefill, decode, and inference-phase durations.
+Correlation reports missing, duplicate, and orphan request IDs plus token-count
+and finish-reason mismatches.
+
+`vllm_inference_seconds_*` uses vLLM's exact finished-request definition,
+`last_token_time - first_scheduled_time`. It is server-side inference-phase
+duration, including batching gaps and preemption, not exclusive CUDA/GPU-kernel
+time. The analyzer does not estimate inference time from client request duration
+and does not subtract tool time or server time from total runtime.

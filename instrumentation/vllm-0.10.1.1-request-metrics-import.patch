@@ -1,0 +1,8 @@
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -11,4 +11,5 @@
+ from vllm.outputs import (CompletionOutput, PoolingOutput,
+                           PoolingRequestOutput, RequestOutput)
++from vllm.request_metrics_jsonl import log_finished_request_metrics
+ from vllm.sampling_params import RequestOutputKind
+ from vllm.transformers_utils.tokenizer import AnyTokenizer

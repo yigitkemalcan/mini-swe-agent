@@ -14,7 +14,11 @@ from minisweagent.config import builtin_config_dir, get_config_from_spec
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
-from minisweagent.run.benchmarks.utils.common import ProgressTrackingAgent, with_default_tool_log_path
+from minisweagent.run.benchmarks.utils.common import (
+    ProgressTrackingAgent,
+    with_default_model_log_path,
+    with_default_tool_log_path,
+)
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.serialize import UNSET, recursive_merge
 
@@ -91,6 +95,8 @@ def process_instance(
         agent_config = with_default_tool_log_path(
             inst_config.get("agent", {}), instance_dir / f"{iid}.traj.tool_events.jsonl"
         )
+        agent_config = with_default_model_log_path(agent_config, instance_dir / f"{iid}.traj.model_events.jsonl")
+        agent_config.setdefault("run_id", output_dir.name)
         agent_config["output_path"] = str(instance_dir / f"{iid}.traj.json")
         agent = ProgramBenchAgent(
             model,

@@ -1,7 +1,10 @@
+import contextlib
 import json
 import logging
 import os
+import re
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -58,8 +61,21 @@ class LitellmModel:
 
     def __init__(self, *, config_class: Callable = LitellmModelConfig, **kwargs):
         self.config = config_class(**kwargs)
+        self.request_context: dict[str, Any] = {}
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
+
+    def set_request_context(self, *, run_id: str, instance_id: str, step_id: int) -> None:
+        self.request_context = {"run_id": run_id, "instance_id": instance_id, "step_id": step_id}
+
+    def _make_request_id(self, attempt_number: int) -> str:
+        """Return a unique API-attempt ID carrying the run/instance/step hierarchy."""
+        clean = [
+            re.sub(r"[^A-Za-z0-9_.-]", "_", str(self.request_context.get(key, ""))) or "unknown"
+            for key in ("run_id", "instance_id", "step_id")
+        ]
+        run_id, instance_id, step_id = clean
+        return f"mswea-{run_id}-{instance_id}-step{step_id}-attempt{attempt_number}-{uuid.uuid4().hex}"
 
     def _query(self, messages: list[dict[str, str]], **kwargs):
         try:
@@ -79,31 +95,47 @@ class LitellmModel:
         return set_cache_control(prepared, mode=self.config.set_cache_control)
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
-            with attempt:
-                response = self._query(self._prepare_messages_for_api(messages), **kwargs)
-        cost_output = self._calculate_cost(response)
-        GLOBAL_MODEL_STATS.add(cost_output["cost"])
-        # Note: all model.query() implementations must persist the response and cost on FormatError.
         try:
-            actions = self._parse_actions(response)
-        except FormatError as e:
-            e.messages[0]["extra"].update(cost_output)
+            request_ids = []
+            for attempt_number, attempt in enumerate(
+                retry(logger=logger, abort_exceptions=self.abort_exceptions), start=1
+            ):
+                with attempt:
+                    request_ids.append(self._make_request_id(attempt_number))
+                    headers = dict(self.config.model_kwargs.get("extra_headers", {}))
+                    headers.update(kwargs.get("extra_headers", {}))
+                    headers["X-Request-Id"] = request_ids[-1]
+                    response = self._query(
+                        self._prepare_messages_for_api(messages),
+                        **kwargs | {"extra_headers": headers, "num_retries": 0},
+                    )
+            cost_output = self._calculate_cost(response)
+            GLOBAL_MODEL_STATS.add(cost_output["cost"])
+            # Note: all model.query() implementations must persist the response and cost on FormatError.
             try:
-                e.messages[0]["extra"]["response"] = response.model_dump(mode="json")
-            except Exception:
-                # model_dump failed (e.g. unserializable object); fall back to repr
-                # so the spec contract ("response MUST be persisted") holds unconditionally.
-                e.messages[0]["extra"]["response"] = repr(response)
+                actions = self._parse_actions(response)
+            except FormatError as e:
+                e.messages[0]["extra"].update(cost_output | {"request_ids": request_ids})
+                try:
+                    e.messages[0]["extra"]["response"] = response.model_dump(mode="json")
+                except Exception:
+                    # model_dump failed (e.g. unserializable object); fall back to repr
+                    # so the spec contract ("response MUST be persisted") holds unconditionally.
+                    e.messages[0]["extra"]["response"] = repr(response)
+                raise
+            message = response.choices[0].message.model_dump()
+            message["extra"] = {
+                "actions": actions,
+                "response": response.model_dump(),
+                "request_ids": request_ids,
+                **cost_output,
+                "timestamp": time.time(),
+            }
+            return message
+        except Exception as e:
+            with contextlib.suppress(Exception):
+                e.model_request_ids = request_ids
             raise
-        message = response.choices[0].message.model_dump()
-        message["extra"] = {
-            "actions": actions,
-            "response": response.model_dump(),
-            **cost_output,
-            "timestamp": time.time(),
-        }
-        return message
 
     def _calculate_cost(self, response) -> dict[str, float]:
         try:
