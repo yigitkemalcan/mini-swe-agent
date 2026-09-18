@@ -14,7 +14,7 @@ from jinja2 import StrictUndefined, Template
 from pydantic import BaseModel
 
 from minisweagent import Environment, Model, __version__
-from minisweagent.exceptions import FormatError, InterruptAgentFlow, LimitsExceeded, TimeExceeded
+from minisweagent.exceptions import FormatError, InterruptAgentFlow, LimitsExceeded, Submitted, TimeExceeded
 from minisweagent.models.utils.actions_toolcall_response import finish_reason_from_responses_api
 from minisweagent.utils.serialize import recursive_merge
 
@@ -42,7 +42,9 @@ class AgentConfig(BaseModel):
     an existing file rather than replacing it, so reset the file yourself if you need a clean one."""
     model_log_path: Path | None = None
     """Append one JSONL event per model request to this path.
-    Durations cover the direct `model.query(...)` call, including model-client and server overhead."""
+    Durations cover the direct `model.query(...)` call, including model-client and server overhead.
+    `attempt_durations_ns` splits that out per actual API attempt, so time lost to failed attempts
+    stays separable from the request that answered."""
     run_id: str = ""
     """Identifier shared by all instances in one benchmark run, used to correlate model API attempts."""
 
@@ -208,12 +210,18 @@ class DefaultAgent:
                 "total_tokens": None,
                 "finish_reason": None,
                 "status": "error" if exception is not None else "success",
+                "outcome": "completed",
             }
             if exception is not None:
                 event |= {"error_type": type(exception).__name__, "error_message": str(exception)}
                 if request_ids := getattr(exception, "model_request_ids", None):
                     event |= {"request_id": request_ids[-1], "request_ids": request_ids}
+                if attempt_durations := getattr(exception, "model_attempt_durations_ns", None):
+                    event["attempt_durations_ns"] = attempt_durations
                 message = _message_from_model_exception(exception)
+                # A recovered response means the request itself completed and was billed; the agent
+                # merely could not parse it. Only a request that returned nothing failed outright.
+                event["outcome"] = "unparsed" if message is not None else "failed"
             if message is not None:
                 event |= _model_response_fields(message)
             line = json.dumps(event)
@@ -281,10 +289,11 @@ class DefaultAgent:
         """Record the end of the execution, then serialize and append the event. Never raises."""
         try:
             event |= {"end_time_ns": time.time_ns(), "duration_ns": time.perf_counter_ns() - start_ns}
-            if exception is not None:
-                event |= {"exception_type": type(exception).__name__, "exception_message": str(exception)}
-            else:
+            if exception is None:
                 event |= _returned_event_fields(output)
+            else:
+                event |= {"exception_type": type(exception).__name__, "exception_message": str(exception)}
+                event |= _escaped_event_fields(exception)
             line = json.dumps(event)  # serialize before touching the filesystem
             path = self.config.tool_log_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -338,13 +347,30 @@ def _returned_event_fields(output: dict) -> dict[str, Any]:
     Environments report timeouts and other command failures in their return value (`returncode` -1
     plus `exception_info`), which must stay distinguishable from an exception escaping `env.execute`.
     """
-    fields: dict[str, Any] = {"return_code": output.get("returncode")}
+    fields: dict[str, Any] = {"outcome": "returned", "return_code": output.get("returncode")}
     if isinstance(text := output.get("output"), str):
         fields["output_size_bytes"] = len(text.encode("utf-8"))
     if exception_info := output.get("exception_info"):
         fields["returned_exception_info"] = exception_info
     if exception_type := output.get("extra", {}).get("exception_type"):
         fields["returned_exception_type"] = exception_type
+    return fields
+
+
+def _escaped_event_fields(exception: Exception) -> dict[str, Any]:
+    """Tool event fields for an exception that escaped `env.execute`.
+
+    `Submitted` is the terminal submission call rather than a failure: the command itself ran, and
+    every environment raises it only after a zero return code, so the code is known rather than
+    guessed. Its payload is the output without the marker line, so it gets its own field instead of
+    standing in for the output size of an observation that was never returned to the model.
+    """
+    if not isinstance(exception, Submitted):
+        return {"outcome": "raised"}
+    fields: dict[str, Any] = {"outcome": "submitted", "return_code": 0}
+    messages = getattr(exception, "messages", ())
+    if messages and isinstance(submission := messages[0].get("extra", {}).get("submission"), str):
+        fields["submission_size_bytes"] = len(submission.encode("utf-8"))
     return fields
 
 
@@ -373,4 +399,6 @@ def _model_response_fields(message: dict) -> dict[str, Any]:
     }
     if request_ids := extra.get("request_ids"):
         fields |= {"request_id": request_ids[-1], "request_ids": request_ids}
+    if attempt_durations := extra.get("attempt_durations_ns"):
+        fields["attempt_durations_ns"] = attempt_durations
     return fields

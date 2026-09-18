@@ -73,6 +73,18 @@ class CorrelatedModel(DeterministicModel):
         return output
 
 
+class RetryingModel(DeterministicModel):
+    """A model whose first two API attempts fail, as the retry loop inside query() would report them."""
+
+    def query(self, messages, **kwargs):
+        output = super().query(messages, **kwargs)
+        output["extra"] |= {
+            "request_ids": ["id-attempt1", "id-attempt2", "id-attempt3"],
+            "attempt_durations_ns": [700_000_000, 300_000_000, 5_000_000],
+        }
+        return output
+
+
 def test_logs_every_request_including_response_without_tool_call(tmp_path, agent_config):
     agent = DefaultAgent(
         DeterministicModel(
@@ -149,6 +161,7 @@ def test_model_exception_is_logged_and_reraised(tmp_path, agent_config):
         "total_tokens": None,
         "finish_reason": None,
         "status": "error",
+        "outcome": "failed",
         "error_type": "RuntimeError",
         "error_message": "model unavailable",
     }
@@ -168,6 +181,7 @@ def test_format_error_preserves_response_usage_in_error_event(tmp_path, agent_co
     assert (event["prompt_tokens"], event["completion_tokens"], event["total_tokens"]) == (7, 5, 12)
     assert event["finish_reason"] == "length"
     assert event["status"] == "error"
+    assert event["outcome"] == "unparsed"  # the request completed and was billed; only parsing failed
 
 
 def test_logging_disabled_does_not_create_model_events(tmp_path, agent_config):
@@ -179,3 +193,34 @@ def test_logging_disabled_does_not_create_model_events(tmp_path, agent_config):
     agent.run("task")
 
     assert [path.name for path in tmp_path.iterdir()] == ["run.traj.json"]
+
+
+def test_successful_event_is_classified_and_records_one_attempt(tmp_path, agent_config):
+    """A parsed response is `completed`, and its single attempt is timed like any other."""
+    agent = DefaultAgent(
+        DeterministicModel(outputs=[response_output([{"command": SUBMIT}], prompt=3, completion=2)]),
+        LocalEnvironment(),
+        **agent_config | {"model_log_path": tmp_path / "events.jsonl"},
+    )
+    agent.run("task")
+
+    event = read_events(tmp_path / "events.jsonl")[0]
+    assert (event["outcome"], event["status"]) == ("completed", "success")
+    assert "error_type" not in event
+
+
+def test_retried_call_keeps_every_attempt_duration(tmp_path, agent_config):
+    """One logical call spanning three attempts stays one event, but the failed attempts stay separable."""
+    agent = DefaultAgent(
+        RetryingModel(outputs=[response_output([{"command": SUBMIT}], prompt=3, completion=2)]),
+        LocalEnvironment(),
+        **agent_config | {"model_log_path": tmp_path / "events.jsonl"},
+    )
+    agent.run("task")
+
+    events = read_events(tmp_path / "events.jsonl")
+    assert len(events) == 1
+    assert events[0]["attempt_durations_ns"] == [700_000_000, 300_000_000, 5_000_000]
+    assert len(events[0]["request_ids"]) == len(events[0]["attempt_durations_ns"])
+    assert events[0]["request_id"] == "id-attempt3"
+    assert events[0]["outcome"] == "completed"

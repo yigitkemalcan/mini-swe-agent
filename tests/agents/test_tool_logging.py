@@ -84,8 +84,10 @@ def test_events_written_for_each_action(tmp_path, agent_config):
         ("tool_execution", 2, 0),
     ]
     assert [e["raw_action"] for e in events] == ["echo 'a  b' && exit 3", "echo second", f"{SUBMIT} && echo done"]
-    assert [e.get("return_code") for e in events] == [3, 0, None]
+    assert [e["outcome"] for e in events] == ["returned", "returned", "submitted"]
+    assert [e.get("return_code") for e in events] == [3, 0, 0]
     assert [e.get("output_size_bytes") for e in events] == [len("a  b\n"), len("second\n"), None]
+    assert [e.get("submission_size_bytes") for e in events] == [None, None, len("done\n")]
     assert all("tool_call_id" not in e and "instance_id" not in e for e in events)
     assert all(e["duration_ns"] > 0 for e in events)
     assert all(isinstance(e["start_time_ns"], int) and isinstance(e["end_time_ns"], int) for e in events)
@@ -113,6 +115,7 @@ def test_returned_timeout_is_recorded_as_returned_error(tmp_path, agent_config):
     assert agent.run("task")["exit_status"] == "Submitted"
 
     timed_out = read_events(tmp_path / "events.jsonl")[0]
+    assert timed_out["outcome"] == "returned"
     assert timed_out["return_code"] == -1
     assert timed_out["returned_exception_type"] == "TimeoutExpired"
     assert "timed out" in timed_out["returned_exception_info"]
@@ -130,6 +133,7 @@ def test_escaping_exception_is_recorded_and_reraised(tmp_path, agent_config):
         agent.run("task")
 
     event = read_events(tmp_path / "events.jsonl")[0]
+    assert event["outcome"] == "raised"
     assert event["exception_type"] == "RuntimeError"
     assert event["exception_message"] == "env exploded"
     assert "return_code" not in event
@@ -138,7 +142,7 @@ def test_escaping_exception_is_recorded_and_reraised(tmp_path, agent_config):
 
 
 def test_submitted_is_recorded_and_still_ends_the_run(tmp_path, agent_config):
-    """Submitted escapes env.execute, so it is recorded as an exception and still exits cleanly."""
+    """Submitted escapes env.execute, but the command succeeded, so it is classified as a submission."""
     agent = DefaultAgent(
         make_model([{"command": f"{SUBMIT} && echo the-patch"}]),
         LocalEnvironment(),
@@ -148,7 +152,10 @@ def test_submitted_is_recorded_and_still_ends_the_run(tmp_path, agent_config):
 
     event = read_events(tmp_path / "events.jsonl")[0]
     assert event["exception_type"] == "Submitted"
-    assert "return_code" not in event
+    assert event["outcome"] == "submitted"
+    assert event["return_code"] == 0
+    assert event["submission_size_bytes"] == len("the-patch\n")
+    assert "output_size_bytes" not in event  # the submission is not an observation returned to the model
 
 
 def test_actions_after_submit_are_neither_executed_nor_logged(tmp_path, agent_config):
@@ -294,7 +301,8 @@ def test_interactive_agent_logs_actions(tmp_path, agent_config):
         (1, 1, "exit 7"),
         (2, 0, SUBMIT),
     ]
-    assert [e.get("return_code") for e in events] == [0, 7, None]
+    assert [e.get("return_code") for e in events] == [0, 7, 0]
+    assert [e["outcome"] for e in events] == ["returned", "returned", "submitted"]
 
 
 def test_interactive_agent_logging_disabled(tmp_path, agent_config):

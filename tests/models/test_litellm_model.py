@@ -39,7 +39,7 @@ class TestLitellmModel:
         mock_completion.assert_called_once()
         assert mock_completion.call_args.kwargs["tools"] == [BASH_TOOL]
         request_id = mock_completion.call_args.kwargs["extra_headers"]["X-Request-Id"]
-        assert request_id.startswith("mswea-run-7-django__django-11133-step4-attempt1-")
+        assert request_id.startswith("mswea~run-7~django__django-11133~step4~attempt1~")
         assert mock_completion.call_args.kwargs["num_retries"] == 0
         assert result["extra"]["request_ids"] == [request_id]
 
@@ -49,9 +49,11 @@ class TestLitellmModel:
 
         first = model._make_request_id(1)
         second = model._make_request_id(2)
-        assert first.startswith("mswea-run_unsafe-inst_a-step9-attempt1-")
-        assert second.startswith("mswea-run_unsafe-inst_a-step9-attempt2-")
+        assert first.startswith("mswea~run_unsafe~inst_a~step9~attempt1~")
+        assert second.startswith("mswea~run_unsafe~inst_a~step9~attempt2~")
         assert first != second
+        # The separator is stripped from every part, so the run ID is always the second field.
+        assert first.split("~")[1] == "run_unsafe"
 
     @patch("minisweagent.models.litellm_model.litellm.completion", side_effect=RuntimeError("API down"))
     def test_failed_api_attempt_exposes_its_request_id(self, mock_completion, monkeypatch):
@@ -64,6 +66,27 @@ class TestLitellmModel:
 
         request_id = mock_completion.call_args.kwargs["extra_headers"]["X-Request-Id"]
         assert exc.value.model_request_ids == [request_id]
+        assert len(exc.value.model_attempt_durations_ns) == 1
+        assert exc.value.model_attempt_durations_ns[0] > 0
+
+    @patch("minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost", return_value=0.001)
+    @patch("minisweagent.models.litellm_model.litellm.completion")
+    def test_each_attempt_is_timed_separately_across_retries(self, mock_completion, mock_cost, monkeypatch):
+        """A retried call reports one duration per actual API attempt, failed ones included."""
+        monkeypatch.setattr("minisweagent.models.utils.retry.wait_exponential", lambda **_: lambda *_a: 0)
+        tool_call = MagicMock()
+        tool_call.function.name = "bash"
+        tool_call.function.arguments = '{"command": "echo test"}'
+        tool_call.id = "call_1"
+        mock_completion.side_effect = [RuntimeError("API down"), _mock_litellm_response([tool_call])]
+
+        model = LitellmModel(model_name="gpt-4")
+        model.set_request_context(run_id="run-7", instance_id="instance-2", step_id=3)
+        result = model.query([{"role": "user", "content": "test"}])
+
+        durations = result["extra"]["attempt_durations_ns"]
+        assert len(durations) == len(result["extra"]["request_ids"]) == 2
+        assert all(duration > 0 for duration in durations)
 
     @patch("minisweagent.models.litellm_model.litellm.completion")
     @patch("minisweagent.models.litellm_model.litellm.cost_calculator.completion_cost")
