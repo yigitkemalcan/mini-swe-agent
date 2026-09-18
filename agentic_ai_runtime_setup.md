@@ -57,7 +57,7 @@ Run the scripts with `bash`, not `source`.
 | mini-SWE-Agent environment | `/mnt/raid0/yigit/agent-characterization/mini-swe-agent/.venv` |
 | SWE-Bench run root | `/mnt/raid0/yigit/agent-characterization/swebench-runs` |
 | Evaluation logs | `/mnt/raid0/yigit/agent-characterization/logs/run_evaluation` |
-| vLLM request-event log | `/mnt/raid0/yigit/agent-characterization/vllm-logs/request_events.jsonl` |
+| vLLM request-event log | `<SWE-Bench run>/request_events.jsonl` |
 | SWE-Bench evaluator environment | `/mnt/raid0/yigit/agent-characterization/envs/swebench-eval` |
 | vLLM environment | `/mnt/experiment-yigit/qwen-experiment/envs/vllm` |
 | Hugging Face cache | `/mnt/experiment-yigit/qwen-experiment/huggingface-cache` |
@@ -130,10 +130,10 @@ instrumentation/
 scripts/install-vllm-instrumentation.sh
 ```
 
-The server-side request log is:
+Each run's server-side request log is:
 
 ```text
-/mnt/raid0/yigit/agent-characterization/vllm-logs/request_events.jsonl
+/mnt/raid0/yigit/agent-characterization/swebench-runs/<RUN-FOLDER>/request_events.jsonl
 ```
 
 Wait until vLLM reports that the API server is listening before starting the agent.
@@ -220,7 +220,7 @@ bash run-swebench.sh --help
 Validated example:
 
 ```bash
-bash run-swebench.sh --instance '^(django__django-11099)$'
+bash run-swebench.sh --instance 'django__django-11099'
 ```
 
 Use a single instance after instrumentation changes before scaling up.
@@ -328,10 +328,10 @@ utilization is the driver's recent utilization sample, not exclusive GPU-kernel
 time. All reported memory peaks are sampled peaks and can miss sub-interval
 spikes.
 
-### Global vLLM request events
+### Per-run vLLM request events
 
 ```text
-/mnt/raid0/yigit/agent-characterization/vllm-logs/request_events.jsonl
+<RUN-DIRECTORY>/request_events.jsonl
 ```
 
 Contains one server-side record per actual vLLM request attempt, including:
@@ -344,7 +344,7 @@ decode_duration_ns
 inference_duration_ns
 prompt_tokens
 completion_tokens
-finish_reason
+engine_finish_reason
 ```
 
 `inference_duration_ns` is:
@@ -355,7 +355,9 @@ last_token_time - first_scheduled_time
 
 It is a **server-side inference-phase duration**, not exclusive CUDA-kernel/GPU-active time.
 
-The global vLLM file can contain records from multiple runs. Use the encoded run/instance/step/attempt request IDs to select records for a specific experiment.
+The vLLM server routes each record to the run directory encoded in its request
+ID, so each file contains only one experiment's requests. A bounded background
+queue writes the records without blocking vLLM's finished-request path.
 
 ---
 
@@ -400,7 +402,7 @@ find "$RUN_DIR/results" -name '*.model_events.jsonl' -exec wc -l {} \;
 Inspect recent vLLM events:
 
 ```bash
-tail -n 50 /mnt/raid0/yigit/agent-characterization/vllm-logs/request_events.jsonl
+tail -n 50 "$RUN_DIR/request_events.jsonl"
 ```
 
 For validation, the same `request_id` should correlate the mini-SWE-Agent model event with its matching vLLM request event.
@@ -579,6 +581,6 @@ After agent run
 
 Analysis
   -> correlate model_events.jsonl
-     with vllm-logs/request_events.jsonl using request_id
+     with <RUN_DIRECTORY>/request_events.jsonl using request_id
   -> combine with tool_events.jsonl and official evaluation outcome
 ```

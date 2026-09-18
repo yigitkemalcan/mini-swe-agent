@@ -1,6 +1,6 @@
 # Agentic AI Characterization — Research Log
 
-> **Current checkpoint:** the measurement stack now covers tool execution, logical model-request latency, token usage, per-attempt vLLM server timing, request-ID correlation, and run-level CPU/GPU resource sampling. A 100-instance SWE-Bench Verified characterization run has been completed and officially evaluated.
+> **Current checkpoint:** the measurement stack now covers tool execution, logical model-request latency, per-attempt request timing, token usage, per-attempt vLLM server timing, request-ID correlation, outcome classification on both tool and model events, and run-level CPU/GPU resource sampling. Two 100-instance SWE-Bench Verified characterization runs have been completed and officially evaluated. Two known gaps remain measured but uncorrected: the ~184 ms tool-execution floor and the absence of any server-side record for requests vLLM abandons.
 >
 > **Current analysis scope:** semantic classification of shell commands into tool categories remains postponed. Analysis should first use directly recorded counts, durations, token counts, identifiers, exit statuses, and benchmark outcomes.
 >
@@ -122,7 +122,11 @@ step_id
 attempt_id
 ```
 
-A logical model event stores the final `request_id` and all `request_ids` associated with its attempts.
+A logical model event stores the final `request_id`, all `request_ids` associated with its attempts, and `attempt_durations_ns` -- one duration per actual API attempt, failed attempts included.
+
+This matters because a retried call is still **one** event with one `duration_ns`. In `qwen-run-20260917T043711Z-eQus52`, four calls out of 4995 (0.08%) were retried and contributed 3038 s: **20.4% of total model time** and 15.4% of the run's wall-clock span. They are invisible at p50-p95 and worth +4.3% at p99, so they distort *totals and means*, not latency percentiles. Report serving time as `model_request_seconds_total - failed_attempt_seconds_total`.
+
+Retry backoff is deliberately not broken out: it is the remainder of `duration_ns` after the attempts and cannot be separated from client post-processing.
 
 ### 3.3 vLLM server-side inference duration
 
@@ -214,7 +218,7 @@ memory maxima are observed sample maxima, so shorter spikes can be missed.
 | mini-SWE-Agent checkout | `/mnt/raid0/yigit/agent-characterization/mini-swe-agent` |
 | SWE-Bench runs | `/mnt/raid0/yigit/agent-characterization/swebench-runs` |
 | Evaluation logs | `/mnt/raid0/yigit/agent-characterization/logs/run_evaluation` |
-| vLLM request log | `/mnt/raid0/yigit/agent-characterization/vllm-logs/request_events.jsonl` |
+| vLLM request log | `<SWE-Bench run>/request_events.jsonl` |
 | SWE-Bench evaluator env | `/mnt/raid0/yigit/agent-characterization/envs/swebench-eval` |
 | vLLM env | `/mnt/experiment-yigit/qwen-experiment/envs/vllm` |
 | Qwen/HF cache | `/mnt/experiment-yigit/qwen-experiment/huggingface-cache` |
@@ -304,10 +308,16 @@ raw_action
 start_time_ns
 end_time_ns
 duration_ns
+outcome
 return_code
 output_size_bytes
+submission_size_bytes
 exception metadata
 ```
+
+`outcome` is `returned`, `submitted`, or `raised`, so a call is never classified from which fields happen to be present. `submitted` is the terminal submission call: the command itself succeeded, and every environment raises `Submitted` only after a zero return code, so `return_code` is `0` rather than absent. Its payload is recorded as `submission_size_bytes`, not `output_size_bytes`, because the submission is never returned to the model as an observation and must not enter the observation-size distribution.
+
+A filter such as `return_code == 0` previously dropped every submission silently: 89 of 4937 events in `eQus52` and 68 of 4164 in `vyvcar`.
 
 ### 6.2 Model-event log
 
@@ -321,22 +331,36 @@ start_time_ns
 end_time_ns
 duration_ns
 status
+outcome
 finish_reason
 prompt_tokens
 completion_tokens
 total_tokens
 request_id
 request_ids
+attempt_durations_ns
 ```
 
 The event is preserved even when the response produces no executable tool call.
 
+`outcome` separates what `status` conflates:
+
+| `outcome` | Meaning | Inference happened | vLLM record expected |
+| --- | --- | --- | --- |
+| `completed` | Response parsed into actions | Yes | Yes |
+| `unparsed` | Response complete and billed, parsing failed | Yes | Yes |
+| `failed` | No response came back | No | No |
+
+A `FormatError` is a fully successful, billed request the agent could not parse; a `ContextWindowExceededError` is a request the server refused before any inference. Both were previously `status: error`. In `vyvcar` the 167 error events are 149 `unparsed` plus 18 `failed`, and all 18 unmatched vLLM records are exactly the `failed` ones, so no correlation gap is unexplained.
+
+The classification is recovered on read for logs written before the field existed, so both 100-instance runs analyze under this schema without being re-run.
+
 ### 6.3 vLLM request-event log
 
-Global path:
+Per-run path:
 
 ```text
-/mnt/raid0/yigit/agent-characterization/vllm-logs/request_events.jsonl
+/mnt/raid0/yigit/agent-characterization/swebench-runs/<RUN-FOLDER>/request_events.jsonl
 ```
 
 Each actual API attempt records:
@@ -349,12 +373,24 @@ decode_duration_ns
 inference_duration_ns
 prompt_tokens
 completion_tokens
-finish_reason
+engine_finish_reason
 ```
 
-Request IDs correlate the vLLM records with mini-SWE-Agent run, instance, logical step, and retry attempt.
+Request IDs correlate the vLLM records with mini-SWE-Agent run, instance,
+logical step, and retry attempt. A background writer appends queued events so
+filesystem I/O does not block vLLM's finished-request path.
 
-Because this is a global log, records from different experiment runs can coexist. Analysis should filter by the run encoded in the request ID rather than assuming the whole file belongs to one run.
+Request IDs are formed as:
+
+```text
+mswea~<run>~<instance>~step<N>~attempt<K>~<uuid>
+```
+
+The `~` separator is stripped from every part by mini-SWE-Agent's sanitizer, so the run is whatever precedes the second separator whatever the run is named, and the server-side writer depends on no run-directory naming convention. Records written before this change use `-` and remain readable; the analyzer accepts either separator.
+
+The hook cannot raise into vLLM: every failure inside it is logged and swallowed, and an event whose phases are not ordered is dropped rather than written, so the log never contains a record the analyzer would reject.
+
+**Aborted requests are not recorded.** The hook sits on the finished-request path only, so a request vLLM gives up on leaves no server-side trace. In `eQus52` that is 5 attempts of 5000 by count but **3021 s, 15.3% of the run**, by time: vLLM explains only 17.7 s of the 3038 s spent inside retried calls. During that interval, with `--workers 1` and nothing else in flight, whether the GPU was busy or idle is unknown. `attempt_durations_ns` bounds the interval from the client side; closing it would require hooking vLLM's abort path.
 
 ### 6.4 System-metrics log
 
@@ -456,7 +492,9 @@ mini-SWE-Agent/OpenAI serving layer: tool_calls
 vLLM engine layer: stop
 ```
 
-for tool-producing responses. This is expected because tool parsing occurs above the engine's finish-reason layer. It is not a request-correlation error.
+for tool-producing responses. This is expected because tool parsing occurs
+above the engine's finish-reason layer. The analyzer reports the fields
+separately and does not count this semantic difference as a mismatch.
 
 ---
 
@@ -589,6 +627,12 @@ These error cases remain to be inspected separately. They should not automatical
 | Total-token count | Available |
 | Per-attempt request ID | Available |
 | Retry-attempt correlation | Available |
+| Per-attempt request duration | Available (runs after 2026-09-18) |
+| Time lost to failed attempts | Available (runs after 2026-09-18) |
+| Tool outcome classification | Available |
+| Model outcome classification | Available (recovered on read for earlier runs) |
+| Submission payload size | Available (runs after 2026-09-18) |
+| Server-side record of aborted requests | Not available |
 | vLLM queue duration | Available |
 | vLLM prefill duration | Available |
 | vLLM decode duration | Available |
@@ -613,10 +657,15 @@ These error cases remain to be inspected separately. They should not automatical
 4. A model call can produce zero, one, or multiple tool calls.
 5. A `FormatError` can therefore produce a model/vLLM event with no corresponding tool event.
 6. `completion_tokens` is the LLM output-token count.
-7. The global vLLM request log can contain multiple experiment runs; correlate/filter using request IDs.
+7. Each run has its own vLLM request log; correlate records with model events using request IDs.
 8. With `--workers 1`, the characterization is easier to interpret because agent requests do not overlap across multiple benchmark workers.
 9. Empty patches, context-window failures, repeated-format failures, and evaluation errors are meaningful outcomes and should remain represented in the dataset.
 10. Semantic shell-command classification remains a separate offline analysis step and should not alter the raw measurement logs.
+11. Classify tool calls by `outcome`, not by the presence of `return_code`. A `return_code == 0` filter drops every `submitted` event.
+12. Classify model calls by `outcome`, not by `status`. `completed` and `unparsed` are real, billed inferences and belong in latency statistics; `failed` is not and does not. Only `failed` events are expected to have no vLLM record.
+13. Do not report `model_request_seconds_total` or `_mean` as serving time without subtracting `failed_attempt_seconds_total`. Percentiles up to p99 are unaffected by retries; totals and means are not.
+14. Tool-duration statistics contain a constant harness floor of about 184 ms per call (`docker exec` plus a `bash -lc` login shell), which is 94% of p50, 55% of p90, 19% of p99, and 54% of total tool time. It has not been calibrated out. Do not compare tool times across runs or configurations without accounting for it.
+15. The run wall-clock span is not fully accounted for. For `eQus52`: 14630 s vLLM-accounted server time, 1667 s tool execution, 304 s client/frontend overhead, 3021 s unaccounted inside retried calls, 75 s residual agent overhead, of a 19697 s span.
 
 ---
 
