@@ -13,7 +13,7 @@ agent_root=/mnt/raid0/yigit/agent-characterization/mini-swe-agent
 export HF_HOME="$qwen_root/huggingface-cache"
 export VLLM_CACHE_ROOT="$qwen_root/vllm-cache"
 export UV_CACHE_DIR="$qwen_root/uv-cache"
-export MSWEA_VLLM_EVENT_LOG=/mnt/raid0/yigit/agent-characterization/vllm-logs/request_events.jsonl
+export MSWEA_VLLM_RUNS_ROOT=/mnt/raid0/yigit/agent-characterization/swebench-runs
 snapshot="$HF_HOME/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507/snapshots/ac9c66cc9b46af7306746a9250f23d47083d689e"
 
 [[ -d "$snapshot" ]] || { echo "Missing model snapshot: $snapshot" >&2; exit 1; }
